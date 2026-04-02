@@ -4,7 +4,7 @@ import { requireRole } from '@/lib/auth'
 import { writeAgentToConfig, enrichAgentConfigFromWorkspace, removeAgentFromConfig } from '@/lib/agent-sync'
 import { eventBus } from '@/lib/event-bus'
 import { logger } from '@/lib/logger'
-import { runOpenClaw } from '@/lib/command'
+import { runCommand } from '@/lib/command'
 
 /**
  * GET /api/agents/[id] - Get a single agent by ID or name
@@ -227,35 +227,22 @@ export async function DELETE(
     }
 
     if (removeWorkspace) {
-      const agentConfig = agent.config ? JSON.parse(agent.config) : {}
-      const openclawId =
-        String(agentConfig?.openclawId || agent.name || '')
-          .toLowerCase()
-          .replace(/[^a-z0-9._-]+/g, '-')
-          .replace(/^-+|-+$/g, '') || agent.name
-      try {
-        await runOpenClaw(['agents', 'delete', openclawId, '--force'], { timeoutMs: 30000 })
-      } catch (err: any) {
-        logger.error({ err, openclawId, agent: agent.name }, 'Failed to remove OpenClaw agent/workspace')
-        return NextResponse.json(
-          { error: `Failed to remove OpenClaw workspace for ${agent.name}: ${err?.message || 'unknown error'}` },
-          { status: 502 }
-        )
-      }
+      // OpenClaw workspace removal has been removed — workspace cleanup is a no-op
+      logger.info({ agent: agent.name }, 'Agent workspace removal requested (OpenClaw CLI removed, skipping)')
     }
 
     let configCleanupWarning: string | null = null
     try {
       const agentConfig = agent.config ? JSON.parse(agent.config) : {}
-      const openclawId =
+      const agentSlug =
         String(agentConfig?.openclawId || agent.name || '')
           .toLowerCase()
           .replace(/[^a-z0-9._-]+/g, '-')
           .replace(/^-+|-+$/g, '') || agent.name
-      await removeAgentFromConfig({ id: openclawId, name: agent.name })
+      await removeAgentFromConfig({ id: agentSlug, name: agent.name })
     } catch (err: any) {
-      configCleanupWarning = `OpenClaw config cleanup skipped for ${agent.name}: ${err?.message || 'unknown error'}`
-      logger.warn({ err, agent: agent.name }, 'Failed to remove OpenClaw agent config entry')
+      configCleanupWarning = `Config cleanup skipped for ${agent.name}: ${err?.message || 'unknown error'}`
+      logger.warn({ err, agent: agent.name }, 'Failed to remove agent config entry')
     }
 
     db.prepare('DELETE FROM agents WHERE id = ? AND workspace_id = ?').run(agent.id, workspaceId)

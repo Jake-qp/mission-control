@@ -172,13 +172,10 @@ async function loadChannelsViaCli(probe = false): Promise<ChannelsSnapshot> {
     }
   }
 
-  const { runOpenClaw } = await import('@/lib/command')
-  const args = ['channels', 'status', '--json', '--timeout', '5000']
-  if (probe) args.push('--probe')
-  const { stdout } = await runOpenClaw(args, { timeoutMs: probe ? 20000 : 15000 })
+  // OpenClaw CLI fallback removed — return empty snapshot
   return {
-    ...transformGatewayChannels(JSON.parse(stdout)),
-    connected: true,
+    ...transformGatewayChannels({} as GatewayData),
+    connected: false,
   }
 }
 

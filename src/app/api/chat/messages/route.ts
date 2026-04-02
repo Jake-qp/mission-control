@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, db_helpers, Message } from '@/lib/db'
-import { runOpenClaw } from '@/lib/command'
+import { runCommand } from '@/lib/command'
 import { getAllGatewaySessions } from '@/lib/sessions'
 import { eventBus } from '@/lib/event-bus'
 import { requireRole } from '@/lib/auth'
@@ -515,25 +515,8 @@ export async function POST(request: NextRequest) {
               }
               invokeParams.agentId = openclawAgentId
 
-              const invokeResult = await runOpenClaw(
-                [
-                  'gateway',
-                  'call',
-                  'agent',
-                  '--timeout',
-                  '10000',
-                  '--params',
-                  JSON.stringify(invokeParams),
-                  '--json',
-                ],
-                { timeoutMs: 12000 }
-              )
-              const acceptedPayload = parseGatewayJson(invokeResult.stdout)
-              forwardInfo.delivered = true
-              forwardInfo.session = openclawAgentId || undefined
-              if (typeof acceptedPayload?.runId === 'string' && acceptedPayload.runId) {
-                forwardInfo.runId = acceptedPayload.runId
-              }
+              // OpenClaw CLI removed — throw to trigger fallback error handling
+              throw new Error('OpenClaw CLI has been removed; gateway agent invocation is not available')
             }
           } catch (err) {
             // OpenClaw may return accepted JSON on stdout but still emit a late stderr warning.
@@ -594,19 +577,8 @@ export async function POST(request: NextRequest) {
             // Best effort: wait briefly and surface completion/error feedback.
             if (forwardInfo.runId) {
               try {
-                const waitResult = await runOpenClaw(
-                  [
-                    'gateway',
-                    'call',
-                    'agent.wait',
-                    '--timeout',
-                    '8000',
-                    '--params',
-                    JSON.stringify({ runId: forwardInfo.runId, timeoutMs: 6000 }),
-                    '--json',
-                  ],
-                  { timeoutMs: 9000 }
-                )
+                // OpenClaw CLI removed — skip wait
+                const waitResult = { stdout: '{}', stderr: '' }
 
                 const waitPayload = parseGatewayJson(waitResult.stdout)
                 const waitStatus = String(waitPayload?.status || '').toLowerCase()

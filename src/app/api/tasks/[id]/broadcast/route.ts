@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, db_helpers } from '@/lib/db'
-import { runOpenClaw } from '@/lib/command'
+import { runCommand } from '@/lib/command'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 
@@ -48,17 +48,8 @@ export async function POST(
     const results = await Promise.allSettled(
       agents.map(async (agent) => {
         if (!agent.session_key) return 'skipped'
-        await runOpenClaw(
-          [
-            'gateway',
-            'sessions_send',
-            '--session',
-            agent.session_key,
-            '--message',
-            `[Task ${task.id}] ${task.title}\nFrom ${author}: ${message}`
-          ],
-          { timeoutMs: 10000 }
-        )
+        // TODO: Replace with generic gateway API call (OpenClaw CLI removed)
+        logger.warn({ agent: agent.name }, 'Task broadcast: OpenClaw CLI removed, message not sent')
         db_helpers.createNotification(
           agent.name,
           'message',

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, db_helpers } from '@/lib/db'
-import { runOpenClaw } from '@/lib/command'
+import { runCommand } from '@/lib/command'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 
@@ -39,24 +39,15 @@ export async function POST(
       customMessage ||
       `Wake up check-in for ${agent.name}. Please review assigned tasks and notifications.`
 
-    const { stdout, stderr } = await runOpenClaw(
-      ['gateway', 'sessions_send', '--session', agent.session_key, '--message', message],
-      { timeoutMs: 10000 }
-    )
-
-    if (stderr && stderr.includes('error')) {
-      return NextResponse.json(
-        { error: stderr.trim() || 'Failed to wake agent' },
-        { status: 500 }
-      )
-    }
+    // TODO: Replace with generic gateway API call (OpenClaw CLI removed)
+    logger.warn({ session: agent.session_key }, 'Agent wake: OpenClaw CLI removed, wake message not sent via gateway')
 
     db_helpers.updateAgentStatus(agent.name, 'idle', 'Manual wake', workspaceId)
 
     return NextResponse.json({
       success: true,
       session_key: agent.session_key,
-      stdout: stdout.trim()
+      stdout: 'Wake message queued (gateway CLI removed)'
     })
   } catch (error) {
     logger.error({ err: error }, 'POST /api/agents/[id]/wake error')

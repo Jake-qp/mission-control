@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, db_helpers } from '@/lib/db'
-import { runOpenClaw } from '@/lib/command'
+import { runCommand } from '@/lib/command'
 import { requireRole } from '@/lib/auth'
 import { validateBody, createMessageSchema } from '@/lib/validation'
 import { mutationLimiter } from '@/lib/rate-limit'
@@ -55,17 +55,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    await runOpenClaw(
-      [
-        'gateway',
-        'sessions_send',
-        '--session',
-        agent.session_key,
-        '--message',
-        `Message from ${from}: ${message}`
-      ],
-      { timeoutMs: 10000 }
-    )
+    // TODO: Replace with generic gateway API call (OpenClaw CLI removed)
+    logger.warn({ to: agent.session_key }, 'Agent message delivery: OpenClaw CLI removed, message not sent via gateway')
 
     db_helpers.createNotification(
       to,

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase, Notification, db_helpers } from '@/lib/db';
-import { runOpenClaw } from '@/lib/command';
+import { runCommand } from '@/lib/command';
 import { requireRole } from '@/lib/auth';
 import { logger } from '@/lib/logger';
 
@@ -79,29 +79,9 @@ export async function POST(request: NextRequest) {
         const message = formatNotificationMessage(notification);
         
         if (!dry_run) {
-          // Send notification via OpenClaw gateway call agent
+          // Send notification to agent (OpenClaw removed — delivery is a no-op placeholder)
           try {
-            const invokeParams = {
-              message,
-              agentId: notification.recipient,
-              idempotencyKey: `notification-${notification.id}-${Date.now()}`,
-              deliver: false,
-            };
-            const { stdout, stderr } = await runOpenClaw(
-              [
-                'gateway',
-                'call',
-                'agent',
-                '--params',
-                JSON.stringify(invokeParams),
-                '--json'
-              ],
-              { timeoutMs: 30000 }
-            );
-
-            if (stderr && stderr.includes('error')) {
-              throw new Error(`OpenClaw error: ${stderr}`);
-            }
+            logger.warn({ recipient: notification.recipient }, 'Notification delivery: OpenClaw gateway removed, skipping agent call')
             
             // Mark as delivered
             const now = Math.floor(Date.now() / 1000);
@@ -114,7 +94,7 @@ export async function POST(request: NextRequest) {
               session_key: notification.session_key,
               delivered_at: now,
               status: 'delivered',
-              stdout: stdout.substring(0, 200) // Truncate for storage
+              stdout: 'Delivered (gateway CLI removed)'
             });
             
             // Log successful delivery

@@ -1,9 +1,6 @@
 import { getDatabase, db_helpers } from './db'
-import { runOpenClaw } from './command'
-import { callOpenClawGateway } from './openclaw-gateway'
 import { eventBus } from './event-bus'
 import { logger } from './logger'
-import { config } from './config'
 
 interface DispatchableTask {
   id: number
@@ -25,69 +22,6 @@ interface DispatchableTask {
 // ---------------------------------------------------------------------------
 // Model routing
 // ---------------------------------------------------------------------------
-
-/**
- * Classify a task's complexity and return the appropriate model ID to pass
- * to the OpenClaw gateway. Uses keyword signals on title + description.
- *
- * Tiers:
- *   ROUTINE  → cheap model (Haiku)   — file ops, status checks, formatting
- *   MODERATE → mid model  (Sonnet)   — code gen, summaries, analysis, drafts
- *   COMPLEX  → premium model (Opus)  — debugging, architecture, novel problems
- *
- * The caller may override this by setting agent.config.dispatchModel.
- */
-function classifyTaskModel(task: DispatchableTask): string | null {
-  // Allow per-agent config override
-  if (task.agent_config) {
-    try {
-      const cfg = JSON.parse(task.agent_config)
-      if (typeof cfg.dispatchModel === 'string' && cfg.dispatchModel) return cfg.dispatchModel
-    } catch { /* ignore */ }
-  }
-
-  const text = `${task.title} ${task.description ?? ''}`.toLowerCase()
-  const priority = task.priority?.toLowerCase() ?? ''
-
-  // Complex signals → Opus
-  const complexSignals = [
-    'debug', 'diagnos', 'architect', 'design system', 'security audit',
-    'root cause', 'investigate', 'incident', 'failure', 'broken', 'not working',
-    'refactor', 'migration', 'performance optim', 'why is',
-  ]
-  if (priority === 'critical' || complexSignals.some(s => text.includes(s))) {
-    return '9router/cc/claude-opus-4-6'
-  }
-
-  // Routine signals → Haiku
-  const routineSignals = [
-    'status check', 'health check', 'ping', 'list ', 'fetch ', 'format',
-    'rename', 'move file', 'read file', 'update readme', 'bump version',
-    'send message', 'post to', 'notify', 'summarize', 'translate',
-    'quick ', 'simple ', 'routine ', 'minor ',
-  ]
-  if (priority === 'low' && routineSignals.some(s => text.includes(s))) {
-    return '9router/cc/claude-haiku-4-5-20251001'
-  }
-  if (routineSignals.some(s => text.includes(s)) && priority !== 'high' && priority !== 'critical') {
-    return '9router/cc/claude-haiku-4-5-20251001'
-  }
-
-  // Default: let the agent's own configured model handle it (no override)
-  return null
-}
-
-/** Extract the gateway agent identifier from the agent's config JSON.
- *  Falls back to agent_name (display name) if openclawId is not set. */
-function resolveGatewayAgentId(task: DispatchableTask): string {
-  if (task.agent_config) {
-    try {
-      const cfg = JSON.parse(task.agent_config)
-      if (typeof cfg.openclawId === 'string' && cfg.openclawId) return cfg.openclawId
-    } catch { /* ignore */ }
-  }
-  return task.agent_name
-}
 
 function buildTaskPrompt(task: DispatchableTask, rejectionFeedback?: string | null): string {
   const ticket = task.ticket_prefix && task.project_ticket_no
@@ -117,20 +51,6 @@ function buildTaskPrompt(task: DispatchableTask, rejectionFeedback?: string | nu
   return lines.join('\n')
 }
 
-/** Extract first valid JSON object from raw stdout (handles surrounding text/warnings). */
-function parseGatewayJson(raw: string): any | null {
-  const trimmed = String(raw || '').trim()
-  if (!trimmed) return null
-  const start = trimmed.indexOf('{')
-  const end = trimmed.lastIndexOf('}')
-  if (start < 0 || end < start) return null
-  try {
-    return JSON.parse(trimmed.slice(start, end + 1))
-  } catch {
-    return null
-  }
-}
-
 interface AgentResponseParsed {
   text: string | null
   sessionId: string | null
@@ -143,17 +63,10 @@ function parseAgentResponse(stdout: string): AgentResponseParsed {
       : typeof parsed?.session_id === 'string' ? parsed.session_id
       : null
 
-    // OpenClaw agent --json returns { payloads: [{ text: "..." }] }
-    if (parsed?.payloads?.[0]?.text) {
-      return { text: parsed.payloads[0].text, sessionId }
-    }
-    // Fallback: if there's a result or output field
     if (parsed?.result) return { text: String(parsed.result), sessionId }
     if (parsed?.output) return { text: String(parsed.output), sessionId }
-    // Last resort: stringify the whole response
     return { text: JSON.stringify(parsed, null, 2), sessionId }
   } catch {
-    // Not valid JSON — return raw stdout if non-empty
     return { text: stdout.trim() || null, sessionId: null }
   }
 }
@@ -164,18 +77,6 @@ function parseAgentResponse(stdout: string): AgentResponseParsed {
 
 function getAnthropicApiKey(): string | null {
   return (process.env.ANTHROPIC_API_KEY || '').trim() || null
-}
-
-function isGatewayAvailable(): boolean {
-  // Gateway is available if OpenClaw is installed OR a gateway is registered in the DB
-  if (config.openclawHome) return true
-  try {
-    const db = getDatabase()
-    const row = db.prepare('SELECT COUNT(*) as c FROM gateways').get() as { c: number } | undefined
-    return (row?.c ?? 0) > 0
-  } catch {
-    return false
-  }
 }
 
 function classifyDirectModel(task: DispatchableTask): string {
@@ -314,16 +215,6 @@ interface ReviewableTask {
   project_ticket_no: number | null
 }
 
-function resolveGatewayAgentIdForReview(task: ReviewableTask): string {
-  if (task.agent_config) {
-    try {
-      const cfg = JSON.parse(task.agent_config)
-      if (typeof cfg.openclawId === 'string' && cfg.openclawId) return cfg.openclawId
-    } catch { /* ignore */ }
-  }
-  return task.assigned_to || 'jarv'
-}
-
 function buildReviewPrompt(task: ReviewableTask): string {
   const ticket = task.ticket_prefix && task.project_ticket_no
     ? `${task.ticket_prefix}-${String(task.project_ticket_no).padStart(3, '0')}`
@@ -407,38 +298,14 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
 
     try {
       const prompt = buildReviewPrompt(task)
-      let agentResponse: AgentResponseParsed
-
-      if (!isGatewayAvailable() && getAnthropicApiKey()) {
-        // Direct Claude API review — no gateway needed
-        const reviewTask: DispatchableTask = {
-          id: task.id, title: task.title, description: task.description,
-          status: 'quality_review', priority: 'high', assigned_to: 'aegis',
-          workspace_id: task.workspace_id, agent_name: 'aegis', agent_id: 0,
-          agent_config: null, ticket_prefix: task.ticket_prefix,
-          project_ticket_no: task.project_ticket_no, project_id: null,
-        }
-        agentResponse = await callClaudeDirectly(reviewTask, prompt)
-      } else {
-        // Resolve the gateway agent ID from config, falling back to assigned_to or default
-        const reviewAgent = resolveGatewayAgentIdForReview(task)
-
-        const invokeParams = {
-          message: prompt,
-          agentId: reviewAgent,
-          idempotencyKey: `aegis-review-${task.id}-${Date.now()}`,
-          deliver: false,
-        }
-        const finalResult = await runOpenClaw(
-          ['gateway', 'call', 'agent', '--expect-final', '--timeout', '120000', '--params', JSON.stringify(invokeParams), '--json'],
-          { timeoutMs: 125_000 }
-        )
-        const finalPayload = parseGatewayJson(finalResult.stdout)
-          ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))
-        agentResponse = parseAgentResponse(
-          finalPayload?.result ? JSON.stringify(finalPayload.result) : finalResult.stdout
-        )
+      const reviewTask: DispatchableTask = {
+        id: task.id, title: task.title, description: task.description,
+        status: 'quality_review', priority: 'high', assigned_to: 'aegis',
+        workspace_id: task.workspace_id, agent_name: 'aegis', agent_id: 0,
+        agent_config: null, ticket_prefix: task.ticket_prefix,
+        project_ticket_no: task.project_ticket_no, project_id: null,
       }
+      const agentResponse = await callClaudeDirectly(reviewTask, prompt)
 
       if (!agentResponse.text) {
         throw new Error('Aegis review returned empty response')
@@ -695,65 +562,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         ? taskMeta.target_session
         : null
 
-      let agentResponse: AgentResponseParsed
-      const useDirectApi = !isGatewayAvailable() && getAnthropicApiKey()
-
-      if (useDirectApi && !targetSession) {
-        // Direct Claude API dispatch — no gateway needed
-        agentResponse = await callClaudeDirectly(task, prompt)
-      } else if (targetSession) {
-        // Dispatch to a specific existing session via chat.send
-        logger.info({ taskId: task.id, targetSession, agent: task.agent_name }, 'Dispatching task to targeted session')
-        const sendResult = await callOpenClawGateway<any>(
-          'chat.send',
-          {
-            sessionKey: targetSession,
-            message: prompt,
-            idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
-            deliver: false,
-          },
-          125_000,
-        )
-        const status = String(sendResult?.status || '').toLowerCase()
-        if (status !== 'started' && status !== 'ok' && status !== 'in_flight') {
-          throw new Error(`chat.send to session ${targetSession} returned status: ${status}`)
-        }
-        // chat.send is fire-and-forget; we record the session but won't get inline response text
-        agentResponse = {
-          text: `Task dispatched to existing session ${targetSession}. The agent will process it within that session context.`,
-          sessionId: sendResult?.runId || targetSession,
-        }
-      } else {
-        // Step 1: Invoke via gateway (new session)
-        const gatewayAgentId = resolveGatewayAgentId(task)
-        const dispatchModel = classifyTaskModel(task)
-        const invokeParams: Record<string, unknown> = {
-          message: prompt,
-          agentId: gatewayAgentId,
-          idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
-          deliver: false,
-        }
-        // Route to appropriate model tier based on task complexity.
-        // null = no override, agent uses its own configured default model.
-        if (dispatchModel) invokeParams.model = dispatchModel
-
-        // Use --expect-final to block until the agent completes and returns the full
-        // response payload (result.payloads[0].text). The two-step agent → agent.wait
-        // pattern only returns lifecycle metadata and never includes the agent's text.
-        const finalResult = await runOpenClaw(
-          ['gateway', 'call', 'agent', '--expect-final', '--timeout', '120000', '--params', JSON.stringify(invokeParams), '--json'],
-          { timeoutMs: 125_000 }
-        )
-        const finalPayload = parseGatewayJson(finalResult.stdout)
-          ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))
-
-        agentResponse = parseAgentResponse(
-          finalPayload?.result ? JSON.stringify(finalPayload.result) : finalResult.stdout
-        )
-        if (!agentResponse.sessionId && finalPayload?.result?.meta?.agentMeta?.sessionId) {
-          agentResponse.sessionId = finalPayload.result.meta.agentMeta.sessionId
-        }
-      } // end else (new session dispatch)
+      const agentResponse = await callClaudeDirectly(task, prompt)
 
       if (!agentResponse.text) {
         throw new Error('Agent returned empty response')

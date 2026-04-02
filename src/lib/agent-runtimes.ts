@@ -1,11 +1,11 @@
 import crypto from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { config } from './config'
-import { runCommand, runOpenClaw } from './command'
+import { runCommand } from './command'
 import { isHermesInstalled, isHermesGatewayRunning, clearHermesDetectionCache } from './hermes-sessions'
 import { logger } from './logger'
 
-export type RuntimeId = 'openclaw' | 'hermes' | 'claude' | 'codex'
+export type RuntimeId = 'hermes' | 'claude' | 'codex'
 export type DeploymentMode = 'local' | 'docker'
 
 export interface RuntimeStatus {
@@ -39,12 +39,6 @@ export interface RuntimeMeta {
 }
 
 const RUNTIME_META: Record<RuntimeId, RuntimeMeta> = {
-  openclaw: {
-    name: 'OpenClaw',
-    description: 'Multi-agent orchestration with gateway, sessions, and memory.',
-    authRequired: false,
-    authHint: '',
-  },
   hermes: {
     name: 'Hermes Agent',
     description: 'Self-improving AI agent with learning loop, skills, and multi-platform messaging.',
@@ -86,52 +80,6 @@ function pruneJobs() {
 // ---------------------------------------------------------------------------
 // Detection
 // ---------------------------------------------------------------------------
-
-function detectOpenClaw(): RuntimeStatus {
-  const meta = RUNTIME_META.openclaw
-  let installed = false
-  let version: string | null = null
-  let running = false
-
-  // Check config file existence
-  if (config.openclawConfigPath && existsSync(config.openclawConfigPath)) {
-    installed = true
-  }
-
-  // Try to get version
-  try {
-    const result = require('node:child_process').spawnSync(
-      config.openclawBin || 'openclaw',
-      ['--version'],
-      { stdio: 'pipe', timeout: 3000 }
-    )
-    if (result.status === 0) {
-      installed = true
-      version = (result.stdout?.toString() || '').trim() || null
-    }
-  } catch {
-    // binary not found
-  }
-
-  // Check if gateway port is listening (simple sync check)
-  try {
-    const net = require('node:net')
-    const socket = new net.Socket()
-    socket.setTimeout(500)
-    const connected = new Promise<boolean>((resolve) => {
-      socket.once('connect', () => { socket.destroy(); resolve(true) })
-      socket.once('error', () => { socket.destroy(); resolve(false) })
-      socket.once('timeout', () => { socket.destroy(); resolve(false) })
-      socket.connect(config.gatewayPort, config.gatewayHost)
-    })
-    // We can't await here synchronously, so just check config existence for "running"
-    running = installed
-  } catch {
-    // ignore
-  }
-
-  return { id: 'openclaw', ...meta, installed, version, running, authenticated: true }
-}
 
 function detectHermes(): RuntimeStatus {
   const meta = RUNTIME_META.hermes
@@ -270,7 +218,6 @@ function detectCodex(): RuntimeStatus {
 }
 
 const DETECTORS: Record<RuntimeId, () => RuntimeStatus> = {
-  openclaw: detectOpenClaw,
   hermes: detectHermes,
   claude: detectClaude,
   codex: detectCodex,
@@ -315,12 +262,11 @@ export function startInstall(runtime: RuntimeId, mode: DeploymentMode): InstallJ
 
   // Local install — run in background
   const INSTALL_FNS: Record<RuntimeId, (job: InstallJob) => Promise<void>> = {
-    openclaw: installOpenClawLocal,
     hermes: installHermesLocal,
     claude: installClaudeLocal,
     codex: installCodexLocal,
   }
-  const installFn = INSTALL_FNS[runtime] || installOpenClawLocal
+  const installFn = INSTALL_FNS[runtime] || installHermesLocal
   installFn(job).catch((err) => {
     job.status = 'failed'
     job.error = String(err?.message || err)
@@ -373,66 +319,6 @@ async function runInstallCmd(cmd: string, args: string[], job: InstallJob): Prom
     job.output += `> Error: ${err?.message || 'command not found'}\n`
     return false
   }
-}
-
-async function installOpenClawLocal(job: InstallJob): Promise<void> {
-  job.output += '> Installing OpenClaw...\n'
-  const env = {
-    ...getInstallEnv(),
-    NONINTERACTIVE: '1',
-    CI: '1',
-  }
-  try {
-    // Determine download tool: prefer curl, fall back to wget
-    const hasCurl = await runCommand('which', ['curl'], { timeoutMs: 5_000 }).then(r => r.code === 0).catch(() => false)
-    const hasWget = !hasCurl && await runCommand('which', ['wget'], { timeoutMs: 5_000 }).then(r => r.code === 0).catch(() => false)
-
-    if (!hasCurl && !hasWget) {
-      job.status = 'failed'
-      job.error = 'Neither curl nor wget is available. Install one of them first.'
-      job.output += '> Error: Neither curl nor wget found. Cannot download installer.\n'
-      job.finishedAt = Date.now()
-      return
-    }
-
-    const downloadCmd = hasCurl
-      ? 'curl -fsSL https://get.openclaw.dev'
-      : 'wget -qO- https://get.openclaw.dev'
-
-    const result = await runCommand('bash', ['-c', `set -o pipefail; ${downloadCmd} | bash -s -- --non-interactive`], {
-      timeoutMs: 300_000, env,
-      onData: (chunk) => { job.output += chunk },
-    })
-
-    // Verify the binary actually exists after install
-    const { installed: verified } = detectBinary([config.openclawBin || 'openclaw'])
-
-    if (result.code === 0 && verified) {
-      job.output += '\n> OpenClaw installed. Running initial setup...\n'
-      try {
-        const onboard = await runCommand('openclaw', ['onboard', '--non-interactive'], { timeoutMs: 60_000, env })
-        if (onboard.stdout) job.output += onboard.stdout + '\n'
-        if (onboard.stderr) job.output += onboard.stderr + '\n'
-      } catch {
-        job.output += '> Note: "openclaw onboard" skipped (run manually if needed).\n'
-      }
-      job.status = 'success'
-      job.output += '\n> OpenClaw installed successfully.\n'
-    } else if (result.code === 0 && !verified) {
-      job.status = 'failed'
-      job.error = 'Install command succeeded but openclaw binary was not found. curl may not be installed.'
-      job.output += '\n> Install command ran but openclaw was not detected. Is curl installed?\n'
-    } else {
-      job.status = 'failed'
-      job.error = `Install exited with code ${result.code}`
-      job.output += `\n> Install failed (exit code ${result.code}).\n`
-    }
-  } catch (err: any) {
-    job.status = 'failed'
-    job.error = err?.message || 'Unknown error'
-    job.output += `\n> Error: ${job.error}\n`
-  }
-  job.finishedAt = Date.now()
 }
 
 async function installHermesLocal(job: InstallJob): Promise<void> {
@@ -542,23 +428,6 @@ export function getActiveJobs(): InstallJob[] {
 // ---------------------------------------------------------------------------
 
 export function generateDockerSidecar(runtime: RuntimeId): string {
-  if (runtime === 'openclaw') {
-    return `  # OpenClaw Gateway sidecar
-  openclaw-gateway:
-    image: ghcr.io/openclaw/openclaw:latest
-    container_name: openclaw-gateway
-    ports:
-      - "\${OPENCLAW_GATEWAY_PORT:-18789}:18789"
-    volumes:
-      - openclaw-data:/root/.openclaw
-    networks:
-      - mc-net
-    restart: unless-stopped
-
-# Add to volumes section:
-#   openclaw-data:`
-  }
-
   return `  # Hermes Agent sidecar
   hermes-agent:
     image: ghcr.io/nousresearch/hermes-agent:latest

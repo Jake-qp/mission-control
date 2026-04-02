@@ -3,7 +3,7 @@ import net from 'node:net'
 import os from 'node:os'
 import { existsSync, statSync } from 'node:fs'
 import path from 'node:path'
-import { runCommand, runOpenClaw, runClawdbot } from '@/lib/command'
+import { runCommand } from '@/lib/command'
 import { config } from '@/lib/config'
 import { getDatabase } from '@/lib/db'
 import { getAllGatewaySessions, getAgentLiveStatuses } from '@/lib/sessions'
@@ -327,7 +327,7 @@ async function getSystemStatus(workspaceId: number) {
           command: parts.slice(2).join(' ')
         }
       })
-      .filter((proc) => /clawdbot|openclaw/i.test(proc.command))
+      .filter((proc) => /gateway|hermes|claude|codex/i.test(proc.command))
     status.processes = processes
   } catch (error) {
     logger.error({ err: error }, 'Error getting process info')
@@ -389,7 +389,7 @@ async function getGatewayStatus() {
     })
     const match = stdout
       .split('\n')
-      .find((line) => /clawdbot-gateway|openclaw-gateway|openclaw.*gateway/i.test(line))
+      .find((line) => /gateway/i.test(line))
     if (match) {
       const parts = match.trim().split(/\s+/)
       gatewayStatus.running = true
@@ -405,17 +405,9 @@ async function getGatewayStatus() {
     logger.error({ err: error }, 'Error checking port')
   }
 
-  try {
-    const { stdout } = await runOpenClaw(['--version'], { timeoutMs: 3000 })
-    gatewayStatus.version = stdout.trim()
-  } catch (error) {
-    try {
-      const { stdout } = await runClawdbot(['--version'], { timeoutMs: 3000 })
-      gatewayStatus.version = stdout.trim()
-    } catch (innerError) {
-      gatewayStatus.version = 'unknown'
-    }
-  }
+  // Gateway version detection — no longer relies on openclaw/clawdbot binaries.
+  // Version is detected via the gateway health endpoint instead.
+  gatewayStatus.version = 'unknown'
 
   return gatewayStatus
 }
@@ -627,10 +619,8 @@ async function getCapabilities(request?: NextRequest) {
 
   const gateway = gatewayReachable || await isPortOpen(config.gatewayHost, config.gatewayPort)
 
-  const openclawHome = Boolean(
-    (config.openclawStateDir && existsSync(config.openclawStateDir)) ||
-    (config.openclawConfigPath && existsSync(config.openclawConfigPath))
-  )
+  // Legacy: openclawHome capability is no longer detected (OpenClaw removed)
+  const openclawHome = false
 
   const claudeProjectsPath = path.join(config.claudeHome, 'projects')
   const claudeHome = existsSync(claudeProjectsPath)
@@ -690,9 +680,9 @@ async function getCapabilities(request?: NextRequest) {
     } catch { /* ignore */ }
   }
 
-  // Auto-register MC as default dashboard when gateway + openclaw home detected
+  // Auto-register MC as default dashboard when gateway detected
   let dashboardRegistration: { registered: boolean; alreadySet: boolean } | null = null
-  if (gateway && openclawHome) {
+  if (gateway) {
     try {
       let mcUrl = process.env.MC_BASE_URL || ''
       if (!mcUrl && request) {

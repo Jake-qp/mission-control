@@ -10,3 +10,4 @@ GET /api/v1/runs/{run_id}/provenance
 PATCH /api/v1/runs/{run_id}
 POST /api/v1/runs
 PUT /api/v1/runs/{run_id}/eval
+POST /api/hermes/events

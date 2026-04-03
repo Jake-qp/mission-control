@@ -45,6 +45,9 @@ interface Task {
   github_pr_number?: number
   github_pr_state?: string
   comment_count?: number
+  outcome?: 'success' | 'failed' | 'partial' | 'abandoned'
+  error_message?: string
+  resolution?: string
 }
 
 interface Agent {
@@ -1579,6 +1582,35 @@ function TaskDetailModal({
                   </div>
                 )}
               </div>
+
+              {/* Outcome + Resolution */}
+              {task.outcome && (
+                <div className="pt-3 border-t border-border/30 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px]">Outcome</span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                      task.outcome === 'success' ? 'bg-green-500/15 text-green-400' :
+                      task.outcome === 'failed' ? 'bg-red-500/15 text-red-400' :
+                      'bg-yellow-500/15 text-yellow-400'
+                    }`}>
+                      {task.outcome}
+                    </span>
+                  </div>
+                  {task.error_message && (
+                    <div className="text-xs text-red-400/80 bg-red-500/10 rounded-md p-2 border border-red-500/20">
+                      {task.error_message}
+                    </div>
+                  )}
+                  {task.resolution && (
+                    <div className="space-y-1">
+                      <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px]">Resolution</span>
+                      <div className="text-xs text-foreground/80 bg-secondary/40 rounded-md p-3 border border-border/30 whitespace-pre-wrap max-h-[400px] overflow-y-auto leading-relaxed">
+                        {task.resolution}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* GitHub section */}
               {(task.github_issue_number || task.github_branch || task.github_pr_number) && (

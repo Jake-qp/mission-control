@@ -75,68 +75,27 @@ function parseAgentResponse(stdout: string): AgentResponseParsed {
 // Direct Claude API dispatch (gateway-free)
 // ---------------------------------------------------------------------------
 
-function getAnthropicApiKey(): string | null {
-  return (process.env.ANTHROPIC_API_KEY || '').trim() || null
+// ---------------------------------------------------------------------------
+// OpenRouter API — single provider for all LLM calls (agents + Aegis reviews)
+// Previously used Anthropic API directly, which meant separate billing and
+// a separate API key. Now everything goes through OpenRouter.
+// ---------------------------------------------------------------------------
+
+function getOpenRouterApiKey(): string | null {
+  return (process.env.OPENROUTER_API_KEY || '').trim() || null
 }
 
-function classifyDirectModel(task: DispatchableTask): string {
-  // Check per-agent config override first
-  if (task.agent_config) {
-    try {
-      const cfg = JSON.parse(task.agent_config)
-      if (typeof cfg.dispatchModel === 'string' && cfg.dispatchModel) {
-        // Strip gateway prefixes like "9router/cc/" to get bare model ID
-        return cfg.dispatchModel.replace(/^.*\//, '')
-      }
-    } catch { /* ignore */ }
-  }
-
-  const text = `${task.title} ${task.description ?? ''}`.toLowerCase()
-  const priority = task.priority?.toLowerCase() ?? ''
-
-  // Complex → Opus
-  const complexSignals = [
-    'debug', 'diagnos', 'architect', 'design system', 'security audit',
-    'root cause', 'investigate', 'incident', 'refactor', 'migration',
-  ]
-  if (priority === 'critical' || complexSignals.some(s => text.includes(s))) {
-    return 'claude-opus-4-6'
-  }
-
-  // Routine → Haiku
-  const routineSignals = [
-    'status check', 'health check', 'format', 'rename', 'summarize',
-    'translate', 'quick ', 'simple ', 'routine ', 'minor ',
-  ]
-  if (routineSignals.some(s => text.includes(s)) && priority !== 'high' && priority !== 'critical') {
-    return 'claude-haiku-4-5-20251001'
-  }
-
-  // Default → Sonnet
-  return 'claude-sonnet-4-6'
-}
-
-function getAgentSoulContent(task: DispatchableTask): string | null {
-  try {
-    const db = getDatabase()
-    const row = db.prepare(
-      'SELECT soul_content FROM agents WHERE id = ? AND workspace_id = ?'
-    ).get(task.agent_id, task.workspace_id) as { soul_content: string | null } | undefined
-    return row?.soul_content || null
-  } catch {
-    return null
-  }
-}
+// Aegis reviews use Sonnet. If we ever need dispatch back, model routing lives here.
+const AEGIS_REVIEW_MODEL = 'anthropic/claude-sonnet-4-6'
 
 async function callClaudeDirectly(
   task: DispatchableTask,
   prompt: string,
 ): Promise<AgentResponseParsed> {
-  const apiKey = getAnthropicApiKey()
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set — cannot dispatch without gateway')
+  const apiKey = getOpenRouterApiKey()
+  if (!apiKey) throw new Error('OPENROUTER_API_KEY not set — cannot run Aegis reviews')
 
-  const model = classifyDirectModel(task)
-  const soul = getAgentSoulContent(task)
+  const model = AEGIS_REVIEW_MODEL
 
   const messages: Array<{ role: string; content: string }> = [
     { role: 'user', content: prompt },
@@ -148,36 +107,28 @@ async function callClaudeDirectly(
     messages,
   }
 
-  if (soul) {
-    body.system = soul
-  }
+  logger.info({ taskId: task.id, model, agent: task.agent_name }, 'Aegis review via OpenRouter')
 
-  logger.info({ taskId: task.id, model, agent: task.agent_name }, 'Dispatching task via direct Claude API')
-
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
+      'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
   })
 
   if (!res.ok) {
     const errorBody = await res.text().catch(() => '')
-    throw new Error(`Claude API ${res.status}: ${errorBody.substring(0, 500)}`)
+    throw new Error(`OpenRouter API ${res.status}: ${errorBody.substring(0, 500)}`)
   }
 
   const data = await res.json() as {
-    content: Array<{ type: string; text?: string }>
-    usage?: { input_tokens?: number; output_tokens?: number }
+    choices?: Array<{ message?: { content?: string } }>
+    usage?: { prompt_tokens?: number; completion_tokens?: number }
   }
 
-  const text = data.content
-    ?.filter((b: { type: string }) => b.type === 'text')
-    .map((b: { text?: string }) => b.text || '')
-    .join('\n') || null
+  const text = data.choices?.[0]?.message?.content || null
 
   // Record token usage
   if (data.usage) {
@@ -190,10 +141,10 @@ async function callClaudeDirectly(
       `).run(
         model,
         `task-${task.id}`,
-        data.usage.input_tokens || 0,
-        data.usage.output_tokens || 0,
-        (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
-        0, // cost calculated separately
+        data.usage.prompt_tokens || 0,
+        data.usage.completion_tokens || 0,
+        (data.usage.prompt_tokens || 0) + (data.usage.completion_tokens || 0),
+        0,
         now,
         task.workspace_id,
       )
@@ -489,6 +440,13 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
 }
 
 export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: string }> {
+  // All agents use Hermes dispatch (mc_adapter poll loops).
+  // MC server-side dispatch via Claude API is disabled — it has no MCP tools,
+  // produces "I don't have access" answers, and Aegis rejects them, wasting
+  // 400-600s per task on a pointless rejection cycle.
+  // To re-enable: remove this early return.
+  return { ok: true, message: 'Dispatch disabled — agents use Hermes' }
+
   const db = getDatabase()
 
   const tasks = db.prepare(`

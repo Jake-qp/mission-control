@@ -273,7 +273,7 @@ async function syncAgentLiveStatuses(): Promise<number> {
 
 const DAILY_MS = 24 * 60 * 60 * 1000
 const FIVE_MINUTES_MS = 5 * 60 * 1000
-const TICK_MS = 60 * 1000 // Check every minute
+const TICK_MS = 10 * 1000 // 10s tick — Aegis reviews need fast turnaround (was 60s)
 
 /** Initialize the scheduler */
 export function initScheduler() {

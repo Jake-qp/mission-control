@@ -11,10 +11,15 @@ const WEBHOOK_BLOCKED_HOSTNAMES = new Set([
   'metadata.google.internal', 'metadata.internal', 'instance-data',
 ])
 
+// Railway internal networking domains are safe — they're private to our project
+const WEBHOOK_ALLOWED_INTERNAL = ['.railway.internal']
+
 function isBlockedWebhookUrl(urlStr: string): boolean {
   try {
     const url = new URL(urlStr)
     const hostname = url.hostname
+    // Allow Railway internal networking (private to our project)
+    if (WEBHOOK_ALLOWED_INTERNAL.some(suffix => hostname.endsWith(suffix))) return false
     if (WEBHOOK_BLOCKED_HOSTNAMES.has(hostname)) return true
     if (hostname.endsWith('.local')) return true
     // Block private IPv4 ranges
@@ -74,7 +79,7 @@ export async function GET(request: NextRequest) {
  * POST /api/webhooks - Create a new webhook
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = mutationLimiter(request)

@@ -166,6 +166,49 @@ interface ReviewableTask {
   project_ticket_no: number | null
 }
 
+/**
+ * Extract agent capabilities from agent_config JSON for Aegis review context.
+ * Parses Hermes MCP server manifests and OpenClaw-style tool lists.
+ */
+export function extractCapabilities(task: ReviewableTask): string[] | null {
+  if (!task.agent_config) return null
+  try {
+    const cfg = JSON.parse(task.agent_config)
+    const lines: string[] = []
+    lines.push(`Agent "${task.assigned_to}" has the following capabilities:`)
+
+    // Hermes-style: MCP servers from capability manifest
+    const hermesMcp = cfg.hermes?.mcp_servers || cfg.mcp_servers
+    if (hermesMcp && typeof hermesMcp === 'object') {
+      for (const [server, meta] of Object.entries(hermesMcp)) {
+        const desc = (meta as any).description || server
+        const tools = (meta as any).tools
+        lines.push(`- **${server}**: ${desc}`)
+        if (Array.isArray(tools) && tools.length > 0) {
+          lines.push(`  Tools: ${tools.join(', ')}`)
+        }
+      }
+      const hasDb = Object.keys(hermesMcp).some(
+        s => /motherduck|database|duckdb|postgres|mysql|sql/i.test(s)
+      )
+      if (hasDb) {
+        lines.push('')
+        lines.push('**This agent HAS direct database query access via MCP tools.**')
+        lines.push('It does NOT need CSV files, Excel uploads, or manual SQL from the user.')
+      }
+    }
+
+    // OpenClaw-style fallback
+    if (!hermesMcp && cfg.tools?.allow?.length) {
+      lines.push(`- Allowed tools: ${cfg.tools.allow.join(', ')}`)
+    }
+
+    return lines.length > 1 ? lines : null
+  } catch {
+    return null
+  }
+}
+
 function buildReviewPrompt(task: ReviewableTask): string {
   const ticket = task.ticket_prefix && task.project_ticket_no
     ? `${task.ticket_prefix}-${String(task.project_ticket_no).padStart(3, '0')}`
@@ -182,33 +225,65 @@ function buildReviewPrompt(task: ReviewableTask): string {
     lines.push('', '## Task Description', task.description)
   }
 
+  // Inject capability context from agent config
+  const capabilities = extractCapabilities(task)
+  if (capabilities) {
+    lines.push('', '## Agent Capabilities', ...capabilities)
+  }
+
   if (task.resolution) {
-    lines.push('', '## Agent Resolution', task.resolution.substring(0, 6000))
+    // XML delimiters prevent prompt injection from resolution text
+    lines.push(
+      '',
+      '## Agent Resolution',
+      '<agent_resolution>',
+      task.resolution.substring(0, 6000),
+      '</agent_resolution>',
+    )
   }
 
   lines.push(
     '',
-    '## Instructions',
-    'Evaluate whether the agent\'s response adequately addresses the task.',
-    'Respond with EXACTLY one of these two formats:',
+    '## Review Criteria',
+    'Evaluate the resolution (inside <agent_resolution> tags above) against these standards:',
     '',
-    'If the work is acceptable:',
+    '1. **Tool Usage**: If the agent has database or MCP tools listed in Agent Capabilities, '
+      + 'it MUST have used them to retrieve real data. A resolution claiming "I don\'t have access" '
+      + 'or asking the user to "provide CSV/Excel files" is a FAILURE — the agent had the tools.',
+    '2. **Data Grounding**: The resolution must contain specific data points (numbers, names, dates) '
+      + 'from actual queries — not placeholder values, template SQL, or hypothetical examples.',
+    '3. **Task Completeness**: The resolution must directly answer what was asked.',
+    '4. **No Code Generation**: The agent should use its MCP tools, not generate Python/SQL scripts '
+      + 'for the user to run.',
+    '',
+    'Respond with EXACTLY one of these two formats (OUTSIDE the agent_resolution tags):',
+    '',
     'VERDICT: APPROVED',
-    'NOTES: <brief summary of why it passes>',
+    'NOTES: <brief summary>',
     '',
-    'If the work needs improvement:',
     'VERDICT: REJECTED',
-    'NOTES: <specific issues that need to be fixed>',
+    'NOTES: <specific issues>',
   )
 
   return lines.join('\n')
 }
 
-function parseReviewVerdict(text: string): { status: 'approved' | 'rejected'; notes: string } {
-  const upper = text.toUpperCase()
+/**
+ * Parse Aegis review verdict from LLM response.
+ * Only parses text AFTER </agent_resolution> tag to prevent prompt injection
+ * from agent resolution text containing fake "VERDICT: APPROVED" strings.
+ */
+export function parseReviewVerdict(text: string): { status: 'approved' | 'rejected'; notes: string } {
+  // Only parse verdict from text AFTER </agent_resolution> tag
+  const afterResolution = text.includes('</agent_resolution>')
+    ? text.split('</agent_resolution>').pop() || text
+    : text
+
+  const upper = afterResolution.toUpperCase()
   const status = upper.includes('VERDICT: APPROVED') ? 'approved' as const : 'rejected' as const
-  const notesMatch = text.match(/NOTES:\s*(.+)/i)
-  const notes = notesMatch?.[1]?.trim().substring(0, 2000) || (status === 'approved' ? 'Quality check passed' : 'Quality check failed')
+  const notesMatch = afterResolution.match(/NOTES:\s*(.+)/i)
+  const notes = notesMatch?.[1]?.trim().substring(0, 2000)
+    || (status === 'approved' ? 'Quality check passed' : 'Quality check failed')
   return { status, notes }
 }
 

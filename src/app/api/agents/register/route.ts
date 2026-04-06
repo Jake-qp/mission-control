@@ -62,9 +62,23 @@ export async function POST(request: NextRequest) {
     ).get(name, workspaceId) as any | undefined
 
     if (existing) {
+      // Merge incoming config into existing config (allows capability manifest updates)
+      const incomingConfig: Record<string, any> = {}
+      if (body?.config && typeof body.config === 'object') {
+        Object.assign(incomingConfig, body.config)
+      } else {
+        if (capabilities.length > 0) incomingConfig.capabilities = capabilities
+        if (framework) incomingConfig.framework = framework
+      }
+
+      let mergedConfig = existing.config ? JSON.parse(existing.config) : {}
+      if (Object.keys(incomingConfig).length > 0) {
+        mergedConfig = { ...mergedConfig, ...incomingConfig }
+      }
+
       db.prepare(
-        'UPDATE agents SET status = ?, last_seen = ?, updated_at = ? WHERE id = ? AND workspace_id = ?'
-      ).run('idle', now, now, existing.id, workspaceId)
+        'UPDATE agents SET status = ?, config = ?, last_seen = ?, updated_at = ? WHERE id = ? AND workspace_id = ?'
+      ).run('idle', JSON.stringify(mergedConfig), now, now, existing.id, workspaceId)
 
       return NextResponse.json({
         agent: {
@@ -75,13 +89,17 @@ export async function POST(request: NextRequest) {
           created_at: existing.created_at,
         },
         registered: false,
-        message: 'Agent already registered, status updated',
+        message: 'Agent already registered, config and status updated',
       })
     }
 
-    // Create new agent
-    const config: Record<string, any> = {}
-    if (capabilities.length > 0) config.capabilities = capabilities
+    // Create new agent — accept structured config object or legacy capabilities array
+    let config: Record<string, any> = {}
+    if (body?.config && typeof body.config === 'object') {
+      config = body.config
+    } else {
+      if (capabilities.length > 0) config.capabilities = capabilities
+    }
     if (framework) config.framework = framework
 
     const result = db.prepare(`

@@ -104,6 +104,7 @@ async function callClaudeDirectly(
   const body: Record<string, unknown> = {
     model,
     max_tokens: 4096,
+    temperature: 0,
     messages,
   }
 
@@ -215,8 +216,15 @@ function buildReviewPrompt(task: ReviewableTask): string {
     : `TASK-${task.id}`
 
   const lines = [
-    'You are Aegis, the quality reviewer for Mission Control.',
-    'Review the following completed task and its resolution.',
+    'You are Aegis, the quality gate for Mission Control.',
+    'Your job is to confirm that the agent\'s resolution meets minimum viability — not to re-evaluate the analysis or grade its quality. Default to APPROVED.',
+    '',
+    '## Domain Context',
+    '- This is CoHarbor Electric, an electrical contractor using ServiceTitan.',
+    '- Data lives in MotherDuck (cloud DuckDB), queried via MCP tools.',
+    '- ServiceTitan job statuses: Completed, Canceled, In Progress, Scheduled, Hold. "WIP" = "In Progress".',
+    '- Business units may have $0 revenue — showing only non-zero BUs is valid unless the question says "all".',
+    '- Gross margin percentages are stored as decimals (0.296 = 29.6%). Agents should multiply by 100 for display.',
     '',
     `**[${ticket}] ${task.title}**`,
   ]
@@ -244,17 +252,23 @@ function buildReviewPrompt(task: ReviewableTask): string {
 
   lines.push(
     '',
-    '## Review Criteria',
-    'Evaluate the resolution (inside <agent_resolution> tags above) against these standards:',
+    '## Approval Signals (APPROVE if ANY are present)',
+    '- The resolution contains SQL query output (column headers + data rows) — this means the agent queried real data.',
+    '- The resolution contains specific data values (dollar amounts, counts, names, dates) from actual queries.',
+    '- The resolution directly addresses the question asked.',
     '',
-    '1. **Tool Usage**: If the agent has database or MCP tools listed in Agent Capabilities, '
-      + 'it MUST have used them to retrieve real data. A resolution claiming "I don\'t have access" '
-      + 'or asking the user to "provide CSV/Excel files" is a FAILURE — the agent had the tools.',
-    '2. **Data Grounding**: The resolution must contain specific data points (numbers, names, dates) '
-      + 'from actual queries — not placeholder values, template SQL, or hypothetical examples.',
-    '3. **Task Completeness**: The resolution must directly answer what was asked.',
-    '4. **No Code Generation**: The agent should use its MCP tools, not generate Python/SQL scripts '
-      + 'for the user to run.',
+    '## Rejection Criteria (REJECT ONLY if one of these)',
+    '1. **No tool use**: Agent claimed "I don\'t have access" or asked the user to provide data — '
+      + 'but it HAD database tools (see Agent Capabilities above).',
+    '2. **Fabricated data**: Response contains specific numbers with no visible query output backing them.',
+    '3. **Wrong question**: Response doesn\'t address what was asked at all.',
+    '4. **Code generation**: Agent generated Python/SQL scripts for the user to run instead of using its MCP tools.',
+    '',
+    '## Do NOT reject for',
+    '- Formatting or presentation preferences.',
+    '- Showing a subset of results (e.g., non-zero values only) when the question doesn\'t require "all".',
+    '- Minor wording differences between a summary line and the detail below it.',
+    '- Not showing every possible column or breakdown.',
     '',
     'Respond with EXACTLY one of these two formats (OUTSIDE the agent_resolution tags):',
     '',
@@ -262,7 +276,7 @@ function buildReviewPrompt(task: ReviewableTask): string {
     'NOTES: <brief summary>',
     '',
     'VERDICT: REJECTED',
-    'NOTES: <specific issues>',
+    'NOTES: <which rejection criterion (1-4) was violated>',
   )
 
   return lines.join('\n')

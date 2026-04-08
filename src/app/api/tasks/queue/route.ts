@@ -105,20 +105,40 @@ export async function GET(request: NextRequest) {
       })
     }
 
+    // Determine agent role — reviewer agents claim 'review' tasks, workers claim 'assigned'/'inbox'
+    const agentRow = db.prepare(
+      `SELECT role FROM agents WHERE name = ? AND workspace_id = ?`
+    ).get(agent, workspaceId) as { role: string } | undefined
+    const isReviewer = agentRow?.role === 'reviewer'
+
     // Atomic claim: single UPDATE with subquery to eliminate SELECT-UPDATE race condition.
-    const claimed = db.prepare(`
-      UPDATE tasks
-      SET status = 'in_progress', assigned_to = ?, updated_at = ?
-      WHERE id = (
-        SELECT id FROM tasks
-        WHERE workspace_id = ?
-          AND status IN ('assigned', 'inbox')
-          AND (assigned_to IS NULL OR assigned_to = ?)
-        ORDER BY ${priorityRankSql()} ASC, due_date ASC NULLS LAST, created_at ASC
-        LIMIT 1
-      )
-      RETURNING *
-    `).get(agent, now, workspaceId, agent) as any | undefined
+    const claimed = isReviewer
+      ? db.prepare(`
+          UPDATE tasks
+          SET status = 'quality_review', assigned_to = ?, updated_at = ?
+          WHERE id = (
+            SELECT id FROM tasks
+            WHERE workspace_id = ?
+              AND status = 'review'
+              AND assigned_to != ?
+            ORDER BY ${priorityRankSql()} ASC, updated_at ASC
+            LIMIT 1
+          )
+          RETURNING *
+        `).get(agent, now, workspaceId, agent) as any | undefined
+      : db.prepare(`
+          UPDATE tasks
+          SET status = 'in_progress', assigned_to = ?, updated_at = ?
+          WHERE id = (
+            SELECT id FROM tasks
+            WHERE workspace_id = ?
+              AND status IN ('assigned', 'inbox')
+              AND (assigned_to IS NULL OR assigned_to = ?)
+            ORDER BY ${priorityRankSql()} ASC, due_date ASC NULLS LAST, created_at ASC
+            LIMIT 1
+          )
+          RETURNING *
+        `).get(agent, now, workspaceId, agent) as any | undefined
 
     if (claimed) {
       return NextResponse.json({

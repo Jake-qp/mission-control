@@ -306,6 +306,10 @@ export function parseReviewVerdict(text: string): { status: 'approved' | 'reject
  * Uses an agent to evaluate the task resolution, then approves or rejects.
  */
 export async function runAegisReviews(): Promise<{ ok: boolean; message: string }> {
+  // Aegis reviews now run in Hermes container (agents/aegis/) via poll_loop.
+  // Server-side review is disabled to avoid duplicate reviews and OpenRouter costs.
+  return { ok: true, message: 'Aegis reviews disabled — uses Hermes agent' }
+
   const db = getDatabase()
 
   const tasks = db.prepare(`

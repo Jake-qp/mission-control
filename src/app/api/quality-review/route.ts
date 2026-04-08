@@ -115,15 +115,45 @@ export async function POST(request: NextRequest) {
         updated_at: Math.floor(Date.now() / 1000),
       })
     } else if (status === 'rejected') {
-      // Rejected: push back to in_progress with the rejection notes as error_message
-      db.prepare('UPDATE tasks SET status = ?, error_message = ?, updated_at = unixepoch() WHERE id = ? AND workspace_id = ?')
-        .run('in_progress', `Quality review rejected by ${reviewer}: ${notes}`, taskId, workspaceId)
-      eventBus.broadcast('task.status_changed', {
-        id: taskId,
-        status: 'in_progress',
-        previous_status: 'review',
-        updated_at: Math.floor(Date.now() / 1000),
-      })
+      // Increment dispatch_attempts and decide: requeue or fail
+      const currentTask = db.prepare('SELECT dispatch_attempts FROM tasks WHERE id = ? AND workspace_id = ?')
+        .get(taskId, workspaceId) as { dispatch_attempts: number } | undefined
+      const currentAttempts = currentTask?.dispatch_attempts ?? 0
+      const newAttempts = currentAttempts + 1
+      const maxAegisRetries = 3
+
+      if (newAttempts >= maxAegisRetries) {
+        // Too many rejections — move to failed
+        const errorMsg = `Aegis rejected ${newAttempts} times. Last: ${notes}`
+        db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = unixepoch() WHERE id = ? AND workspace_id = ?')
+          .run('failed', errorMsg, newAttempts, taskId, workspaceId)
+        eventBus.broadcast('task.status_changed', {
+          id: taskId,
+          status: 'failed',
+          previous_status: 'review',
+          error_message: errorMsg,
+          reason: 'max_aegis_retries_exceeded',
+          updated_at: Math.floor(Date.now() / 1000),
+        })
+      } else {
+        // Requeue to assigned for re-dispatch with feedback
+        const errorMsg = `Quality review rejected by ${reviewer}: ${notes}`
+        db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = unixepoch() WHERE id = ? AND workspace_id = ?')
+          .run('assigned', errorMsg, newAttempts, taskId, workspaceId)
+
+        // Add rejection as a comment so the worker agent sees it on next dispatch
+        db.prepare('INSERT INTO comments (task_id, author, content, created_at, workspace_id) VALUES (?, ?, ?, unixepoch(), ?)')
+          .run(taskId, reviewer, `Quality Review Rejected (attempt ${newAttempts}/${maxAegisRetries}):\n${notes}`, workspaceId)
+
+        eventBus.broadcast('task.status_changed', {
+          id: taskId,
+          status: 'assigned',
+          previous_status: 'review',
+          error_message: errorMsg,
+          reason: 'aegis_rejection',
+          updated_at: Math.floor(Date.now() / 1000),
+        })
+      }
     }
 
     return NextResponse.json({ success: true, id: result.lastInsertRowid })

@@ -136,9 +136,11 @@ export async function POST(request: NextRequest) {
           updated_at: Math.floor(Date.now() / 1000),
         })
       } else {
-        // Requeue to assigned for re-dispatch with feedback
+        // Requeue to assigned for re-dispatch with feedback.
+        // Clear resolution so the next attempt starts clean — stale resolution
+        // from a previous failed attempt contaminates Aegis review.
         const errorMsg = `Quality review rejected by ${reviewer}: ${notes}`
-        db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = unixepoch() WHERE id = ? AND workspace_id = ?')
+        db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, resolution = NULL, outcome = NULL, updated_at = unixepoch() WHERE id = ? AND workspace_id = ?')
           .run('assigned', errorMsg, newAttempts, taskId, workspaceId)
 
         // Add rejection as a comment so the worker agent sees it on next dispatch
